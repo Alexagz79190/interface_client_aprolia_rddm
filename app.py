@@ -1,21 +1,18 @@
-import os
 import stat
+import posixpath
+from io import StringIO, BytesIO
 import streamlit as st
 import paramiko
-from io import StringIO
 
-st.set_page_config(page_title="Explorateur SFTP", layout="wide")
+st.set_page_config(page_title="SFTP Orders / Archive / Status", layout="wide")
 
-if st.button("Reset connexion"):
-    st.cache_resource.clear()
-    st.rerun()
+# --- Répertoires (relatifs au "home" SFTP) ---
+ORDERS_DIR = "./orders"
+ARCHIVE_DIR = "./archive"
+STATUS_DIR = "./status"
 
-def get_env(name: str, default: str | None = None) -> str:
-    v = os.getenv(name, default)
-    if v is None or v == "":
-        raise RuntimeError(f"Variable d'environnement manquante: {name}")
-    return v
 
+# ----------------- SFTP CONNECT -----------------
 @st.cache_resource
 def connect_sftp():
     host = st.secrets["SFTP_HOST"]
@@ -26,7 +23,6 @@ def connect_sftp():
 
     key_file = StringIO(key_text)
 
-    # Essaye Ed25519 puis RSA
     try:
         pkey = paramiko.Ed25519Key.from_private_key(key_file, password=passphrase)
     except Exception:
@@ -35,85 +31,181 @@ def connect_sftp():
 
     transport = paramiko.Transport((host, port))
     transport.connect(username=user, pkey=pkey)
-
     sftp = paramiko.SFTPClient.from_transport(transport)
 
-    # Stabilisation : se placer à la racine
+    # Stabilisation
     try:
         sftp.chdir("/")
     except Exception:
         pass
 
     return transport, sftp
-    
-def is_dir(attr: paramiko.SFTPAttributes) -> bool:
+
+
+def is_dir(attr):
     return stat.S_ISDIR(attr.st_mode)
 
-def join_path(base: str, name: str) -> str:
-    if base.endswith("/"):
-        return base + name
-    return base + "/" + name
 
-st.title("Explorateur SFTP (lecture arborescence)")
+def ensure_dir(sftp: paramiko.SFTPClient, path: str) -> bool:
+    """Crée le dossier si absent. Retourne True si OK/existe."""
+    try:
+        sftp.stat(path)
+        return True
+    except Exception:
+        try:
+            sftp.mkdir(path)
+            return True
+        except Exception:
+            return False
+
+
+def list_files(sftp: paramiko.SFTPClient, folder: str):
+    """Liste uniquement les fichiers (pas les dossiers) d'un répertoire."""
+    entries = sftp.listdir_attr(folder)
+    files = [e for e in entries if not is_dir(e)]
+    files.sort(key=lambda e: e.filename.lower())
+    return files
+
+
+def read_remote_file(sftp: paramiko.SFTPClient, remote_path: str) -> bytes:
+    with sftp.open(remote_path, "rb") as f:
+        return f.read()
+
+
+def upload_fileobj(sftp: paramiko.SFTPClient, remote_path: str, uploaded_file) -> None:
+    # uploaded_file est un st.uploaded_file (BytesIO-like)
+    with sftp.open(remote_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+
+def archive_file(sftp: paramiko.SFTPClient, src_path: str, archive_dir: str) -> str:
+    """Déplace src_path vers archive_dir. Renvoie le chemin destination."""
+    filename = posixpath.basename(src_path)
+    dst_path = posixpath.join(archive_dir, filename)
+
+    # Si un fichier existe déjà en archive, on suffixe
+    try:
+        sftp.stat(dst_path)
+        base, ext = posixpath.splitext(filename)
+        i = 1
+        while True:
+            candidate = posixpath.join(archive_dir, f"{base}__{i}{ext}")
+            try:
+                sftp.stat(candidate)
+                i += 1
+            except Exception:
+                dst_path = candidate
+                break
+    except Exception:
+        pass
+
+    sftp.rename(src_path, dst_path)
+    return dst_path
+
+
+# ----------------- UI -----------------
+st.title("Interface SFTP : Orders / Archive / Status")
+
+colA, colB = st.columns([1, 1])
+with colA:
+    if st.button("Reset connexion"):
+        st.cache_resource.clear()
+        st.rerun()
+
+with colB:
+    refresh = st.button("Rafraîchir listes")
 
 try:
     transport, sftp = connect_sftp()
 except Exception as e:
-    st.error("Connexion SFTP impossible.")
+    st.error("Connexion SFTP impossible (secrets / clé / passphrase).")
     st.exception(e)
     st.stop()
 
-# Chemin courant (session)
-if "cwd" not in st.session_state:
-    st.session_state.cwd = "/"
+# Vérif / création dossiers
+ok_orders = ensure_dir(sftp, ORDERS_DIR)
+ok_archive = ensure_dir(sftp, ARCHIVE_DIR)
+ok_status = ensure_dir(sftp, STATUS_DIR)
 
-cwd = st.session_state.cwd
+if not ok_orders:
+    st.warning(f"Impossible d'accéder/créer `{ORDERS_DIR}` (droits SFTP ?).")
+if not ok_archive:
+    st.warning(f"Impossible d'accéder/créer `{ARCHIVE_DIR}` (droits SFTP ?).")
+if not ok_status:
+    st.warning(f"Impossible d'accéder/créer `{STATUS_DIR}` (droits SFTP ?).")
 
-col1, col2 = st.columns([2, 1])
-with col1:
-    st.text_input("Dossier courant", value=cwd, key="cwd_input")
-with col2:
-    if st.button("Aller"):
-        st.session_state.cwd = st.session_state.cwd_input
+tab1, tab2 = st.tabs(["📥 Orders (télécharger + archiver)", "📤 Status (uploader)"])
 
-# Bouton parent
-if st.button("⬅️ Remonter d'un niveau"):
-    if cwd in [".", "/"]:
-        st.session_state.cwd = "."
+with tab1:
+    st.subheader(f"Fichiers dans {ORDERS_DIR}")
+
+    if not ok_orders:
+        st.stop()
+
+    try:
+        files = list_files(sftp, ORDERS_DIR)
+    except Exception as e:
+        st.error(f"Impossible de lister `{ORDERS_DIR}`")
+        st.exception(e)
+        st.stop()
+
+    if not files:
+        st.info("Aucun fichier dans orders.")
     else:
-        parent = cwd.rsplit("/", 1)[0]
-        st.session_state.cwd = parent if parent else "/"
+        for fattr in files:
+            fname = fattr.filename
+            remote_path = posixpath.join(ORDERS_DIR, fname)
 
-cwd = st.session_state.cwd
+            c1, c2, c3, c4 = st.columns([4, 2, 2, 2])
+            with c1:
+                st.write(f"📄 `{fname}`")
+            with c2:
+                st.write(f"{fattr.st_size/1024:.1f} KB")
+            with c3:
+                # Download button : on lit le fichier au moment de l'affichage
+                try:
+                    data = read_remote_file(sftp, remote_path)
+                    st.download_button(
+                        label="Télécharger",
+                        data=data,
+                        file_name=fname,
+                        mime="application/octet-stream",
+                        key=f"dl_{remote_path}",
+                    )
+                except Exception as e:
+                    st.button("Télécharger", disabled=True, key=f"dl_disabled_{remote_path}")
+            with c4:
+                if st.button("Archiver", key=f"arch_{remote_path}", disabled=not ok_archive):
+                    try:
+                        dst = archive_file(sftp, remote_path, ARCHIVE_DIR)
+                        st.success(f"Archivé vers `{dst}`")
+                        st.rerun()
+                    except Exception as e:
+                        st.error("Échec archivage.")
+                        st.exception(e)
 
-st.write(f"**Contenu de :** `{cwd}`")
+with tab2:
+    st.subheader(f"Déposer un fichier dans {STATUS_DIR}")
 
-try:
-    entries = sftp.listdir_attr(cwd)
-except Exception as e:
-    st.error(f"Impossible de lister `{cwd}`")
-    st.exception(e)
-    st.stop()
+    if not ok_status:
+        st.stop()
 
-# Trier : dossiers d'abord puis fichiers
-entries_sorted = sorted(entries, key=lambda a: (not is_dir(a), a.filename.lower()))
+    uploaded = st.file_uploader(
+        "Choisir un fichier Excel",
+        type=["xlsx", "xls"],
+        accept_multiple_files=False
+    )
 
-dirs = [e for e in entries_sorted if is_dir(e)]
-files = [e for e in entries_sorted if not is_dir(e)]
+    rename = st.text_input("Nom de fichier cible (optionnel)", value="")
 
-st.subheader("Dossiers")
-if not dirs:
-    st.caption("Aucun dossier.")
-else:
-    for d in dirs:
-        if st.button(f"📁 {d.filename}", key=f"dir_{cwd}_{d.filename}"):
-            st.session_state.cwd = join_path(cwd, d.filename)
+    if uploaded is not None:
+        target_name = rename.strip() if rename.strip() else uploaded.name
+        remote_target = posixpath.join(STATUS_DIR, target_name)
 
-st.subheader("Fichiers")
-if not files:
-    st.caption("Aucun fichier.")
-else:
-    for f in files:
-        size_kb = f.st_size / 1024
-        st.write(f"📄 `{f.filename}` — {size_kb:.1f} KB")
-
+        if st.button("Uploader vers status"):
+            try:
+                upload_fileobj(sftp, remote_target, uploaded)
+                st.success(f"Upload OK → `{remote_target}`")
+            except Exception as e:
+                st.error("Upload KO.")
+                st.exception(e)
