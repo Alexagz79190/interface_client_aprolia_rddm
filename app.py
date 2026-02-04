@@ -150,7 +150,7 @@ def archive_file(sftp: paramiko.SFTPClient, src_path: str, archive_dir: str) -> 
 
 
 # ----------------- UI -----------------
-st.title("Interface SFTP : Orders / Archive / Status")
+st.title("Interface SFTP : AIR DDM")
 
 colA, colB = st.columns([1, 1])
 with colA:
