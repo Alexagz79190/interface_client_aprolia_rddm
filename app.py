@@ -6,6 +6,10 @@ from io import StringIO
 
 st.set_page_config(page_title="Explorateur SFTP", layout="wide")
 
+if st.button("Reset connexion"):
+    st.cache_resource.clear()
+    st.rerun()
+
 def get_env(name: str, default: str | None = None) -> str:
     v = os.getenv(name, default)
     if v is None or v == "":
@@ -13,17 +17,16 @@ def get_env(name: str, default: str | None = None) -> str:
     return v
 
 @st.cache_resource
-def get_sftp_client():
-    host = get_env("SFTP_HOST")
-    port = int(os.getenv("SFTP_PORT", "22"))
-    user = get_env("SFTP_USER")
-    key_text = get_env("SFTP_PRIVATE_KEY")
-    passphrase = os.getenv("SFTP_PASSPHRASE", None)
+def connect_sftp():
+    host = st.secrets["SFTP_HOST"]
+    port = int(st.secrets.get("SFTP_PORT", "22"))
+    user = st.secrets["SFTP_USER"]
+    key_text = st.secrets["SFTP_PRIVATE_KEY"]
+    passphrase = st.secrets.get("SFTP_PASSPHRASE", None)
 
-    # Paramiko lit la clé depuis un "file-like"
+    from io import StringIO
     key_file = StringIO(key_text)
 
-    # Essaye d'abord Ed25519 puis RSA (les deux plus courants)
     pkey = None
     try:
         pkey = paramiko.Ed25519Key.from_private_key(key_file, password=passphrase)
@@ -34,7 +37,10 @@ def get_sftp_client():
     transport = paramiko.Transport((host, port))
     transport.connect(username=user, pkey=pkey)
 
-    sftp = paramiko.SFTPClient.from_transport(transport)
+    chan = transport.open_session()
+    chan.invoke_subsystem("sftp")
+    sftp = paramiko.SFTPClient.from_channel(chan)
+
     return transport, sftp
 
 def is_dir(attr: paramiko.SFTPAttributes) -> bool:
@@ -48,7 +54,7 @@ def join_path(base: str, name: str) -> str:
 st.title("Explorateur SFTP (lecture arborescence)")
 
 try:
-    transport, sftp = get_sftp_client()
+    transport, sftp = connect_sftp()
 except Exception as e:
     st.error("Connexion SFTP impossible.")
     st.exception(e)
@@ -56,7 +62,7 @@ except Exception as e:
 
 # Chemin courant (session)
 if "cwd" not in st.session_state:
-    st.session_state.cwd = "."
+    st.session_state.cwd = "/"
 
 cwd = st.session_state.cwd
 
