@@ -3,13 +3,59 @@ import posixpath
 from io import StringIO, BytesIO
 import streamlit as st
 import paramiko
+import hashlib
+import hmac
 
 st.set_page_config(page_title="SFTP Orders / Archive / Status", layout="wide")
+require_auth()
+with st.sidebar:
+    st.write(f"Connecté : **{st.session_state.get('username','')}**")
+    if st.button("Déconnexion"):
+        st.session_state.authenticated = False
+        st.session_state.username = ""
+        st.rerun()
+
 
 # --- Répertoires (relatifs au "home" SFTP) ---
 ORDERS_DIR = "./orders"
 ARCHIVE_DIR = "./archive"
 STATUS_DIR = "./status"
+
+
+def _sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def check_login(username: str, password: str) -> bool:
+    users = st.secrets.get("AUTH_USERS", [])
+    pwd_hash = _sha256_hex(password)
+
+    for u in users:
+        if u.get("username") == username:
+            stored = u.get("password_sha256", "")
+            return hmac.compare_digest(pwd_hash, stored)
+    return False
+
+def require_auth():
+    if st.session_state.get("authenticated"):
+        return
+
+    st.title("Connexion")
+    with st.form("login_form"):
+        username = st.text_input("Utilisateur")
+        password = st.text_input("Mot de passe", type="password")
+        submitted = st.form_submit_button("Se connecter")
+
+    if submitted:
+        if check_login(username.strip(), password):
+            st.session_state.authenticated = True
+            st.session_state.username = username.strip()
+            st.success("Connexion OK")
+            st.rerun()
+        else:
+            st.error("Identifiants incorrects")
+
+    st.stop()
+
 
 
 # ----------------- SFTP CONNECT -----------------
