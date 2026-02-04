@@ -1,27 +1,19 @@
 import stat
 import posixpath
-from io import StringIO, BytesIO
+from io import StringIO
 import streamlit as st
 import paramiko
 import hashlib
 import hmac
 
 st.set_page_config(page_title="SFTP Orders / Archive / Status", layout="wide")
-require_auth()
-with st.sidebar:
-    st.write(f"Connecté : **{st.session_state.get('username','')}**")
-    if st.button("Déconnexion"):
-        st.session_state.authenticated = False
-        st.session_state.username = ""
-        st.rerun()
-
 
 # --- Répertoires (relatifs au "home" SFTP) ---
 ORDERS_DIR = "./orders"
 ARCHIVE_DIR = "./archive"
 STATUS_DIR = "./status"
 
-
+# ----------------- AUTH -----------------
 def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -56,7 +48,15 @@ def require_auth():
 
     st.stop()
 
+# On exige la connexion AVANT d'afficher le reste
+require_auth()
 
+with st.sidebar:
+    st.write(f"Connecté : **{st.session_state.get('username','')}**")
+    if st.button("Déconnexion"):
+        st.session_state.authenticated = False
+        st.session_state.username = ""
+        st.rerun()
 
 # ----------------- SFTP CONNECT -----------------
 @st.cache_resource
