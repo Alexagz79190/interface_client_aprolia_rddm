@@ -24,10 +24,9 @@ def connect_sftp():
     key_text = st.secrets["SFTP_PRIVATE_KEY"]
     passphrase = st.secrets.get("SFTP_PASSPHRASE", None)
 
-    from io import StringIO
     key_file = StringIO(key_text)
 
-    pkey = None
+    # Essaye Ed25519 puis RSA
     try:
         pkey = paramiko.Ed25519Key.from_private_key(key_file, password=passphrase)
     except Exception:
@@ -37,12 +36,16 @@ def connect_sftp():
     transport = paramiko.Transport((host, port))
     transport.connect(username=user, pkey=pkey)
 
-    chan = transport.open_session()
-    chan.invoke_subsystem("sftp")
-    sftp = paramiko.SFTPClient.from_channel(chan)
+    sftp = paramiko.SFTPClient.from_transport(transport)
+
+    # Stabilisation : se placer à la racine
+    try:
+        sftp.chdir("/")
+    except Exception:
+        pass
 
     return transport, sftp
-
+    
 def is_dir(attr: paramiko.SFTPAttributes) -> bool:
     return stat.S_ISDIR(attr.st_mode)
 
